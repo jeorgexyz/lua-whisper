@@ -8,9 +8,9 @@ The fourth project in the same line as
 [lua-agent](https://github.com/jeorgexyz/lua-agent) and
 [lua-mamba](https://github.com/jeorgexyz/lua-mamba)
 
-> **Status: in progress.** The front end is done -- FFT checked against
-> numpy, log-mel checked against WhisperFeatureExtractor. The encoder,
-> decoder and tokenizer are not written yet.
+> **Status: in progress.** Front end and weight loading are done and
+> checked against Hugging Face. The encoder, decoder and tokenizer are not
+> written yet.
 
 ## Design Philosophy
 
@@ -144,6 +144,56 @@ arithmetic to move a 1.2% number is a bad trade in a repo built to be read.
 `bench_fft.lua` prints these numbers so the trade can be checked rather than
 believed.
 
+## Weights
+
+`tools/export_whisper.py` writes a flat float32 checkpoint; `weights.lua`
+reads it in one pass. 167 tensors, 37.76M floats, 151 MB, loading in 3.8s.
+
+```bash
+python tools/export_whisper.py     # writes whisper-tiny.en.lwb
+python tools/check_weights.py
+```
+
+```
+tensor                     elements   max |diff|
+enc.conv1.weight              92160    0.000e+00
+enc.0.k_proj.weight          147456    0.000e+00
+enc.pos                      576000    0.000e+00
+dec.tok_emb                19915776    0.000e+00
+dec.last.final_ln.bias          384    0.000e+00
+
+encoder self-attn k_proj has no bias     yes
+decoder cross-attn k_proj has no bias    yes
+```
+
+Exact, not approximate — it is the same float32 bits, just relocated.
+
+### The bias trap, and why it is checked three ways
+
+In Whisper's attention, `q_proj`, `v_proj` and `out_proj` each carry a bias
+and **`k_proj` does not** — self-attention and cross-attention, encoder and
+decoder alike. There is no flag for it.
+
+An exporter that writes a bias for all four produces a perfectly valid
+file, 384 floats longer per attention block than the reader expects. Every
+tensor after the first block is then read from the wrong offset, and the
+result is not a crash: the model loads, runs, and transcribes plausible
+nonsense. That is a genuinely miserable thing to debug backwards from bad
+text.
+
+So it is not left to a comment:
+
+1. Both sides list `(name, has_bias)` as data, in the same order, so they
+   cannot drift apart by accident.
+2. The exporter counts the tensors it wrote and compares against a count
+   derived independently from the config.
+3. The reader checks it consumed the file to the byte, and
+   `check_weights.py` probes actual values — including the *last* tensor in
+   the file, which can only match if everything before it is aligned.
+
+Size checks alone would not catch a wrong *order*: swap two tensors of
+equal shape and the byte count stays perfect. Hence the value probes.
+
 ## Runtime
 
 Measured pure-Lua throughput on the development machine is 164 MFLOP/s peak
@@ -169,14 +219,15 @@ audio.lua       WAV parsing, framing, mel projection    [done]
 fft.lua         the transform                          [done]
 encoder.lua     conv frontend, 4 transformer layers
 decoder.lua     self-attention, cross-attention, tied lm_head
-weights.lua     flat float32 loader
+weights.lua     flat float32 loader                   [done]
 tokenizer.lua   GPT-2 byte-level BPE
 validate.lua    per-layer parity against a PyTorch dump
-tools/export_whisper.py
+tools/export_whisper.py                                [done]
 tools/reference.py
 tools/check_fft.py                                     [done]
 tools/check_mel.py                                     [done]
 tools/export_mel.py                                    [done]
+tools/check_weights.py                                 [done]
 ```
 
 Two claims, once it runs: per-layer parity against Hugging Face, and an
