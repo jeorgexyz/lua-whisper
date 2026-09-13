@@ -8,9 +8,8 @@ The fourth project in the same line as
 [lua-agent](https://github.com/jeorgexyz/lua-agent) and
 [lua-mamba](https://github.com/jeorgexyz/lua-mamba)
 
-> **Status: in progress.** Front end, weight loading and the encoder are
-> done and checked against Hugging Face. The decoder and tokenizer are not
-> written yet.
+> **Status: working.** WAV in, text out, matching a completely different
+> runtime character for character. See [End to end](#end-to-end).
 
 ## Design Philosophy
 
@@ -32,6 +31,56 @@ This is the other half of that pair, the same way `llama2.c` sits beside
 What you get in exchange is a mel front end and a cross-attention decoder
 you can read end to end in an afternoon, and a parity check against PyTorch
 that says the reading was accurate.
+
+## End to end
+
+```bash
+lua54 main.lua examples/speech.wav
+```
+
+```
+audio      3.7s, 16000 Hz, 1 channel(s)
+mel        5.2s
+encoder    312s, 1500 positions
+cross-attn 25s (once, reused by every token)
+
+ The quick brown fox jumps over the lazy dog.
+
+tokens     10 in 8s (0.80s each)
+total      353s
+```
+
+The clip is Windows TTS speaking a known sentence, so there is a ground
+truth independent of any model. Three runtimes on the same file:
+
+| | transcript |
+|---|---|
+| ground truth (what was spoken) | The quick brown fox jumps over the lazy dog. |
+| faster-whisper, CTranslate2 int8 | The quick brown fox jumps over the lazy dog. |
+| **lua-whisper, pure Lua float32** | **The quick brown fox jumps over the lazy dog.** |
+
+Character-exact against a different language, a different weight format and
+a different numeric precision. Agreement across that gap says more than any
+per-layer epsilon can: the per-stage checks prove the arithmetic matches,
+this proves the whole thing *behaves* the same.
+
+The faster-whisper row is [polymimus](https://github.com/jeorgexyz/polymimus)'
+engine -- the practical counterpart to this repo, and a useful way to
+generate reference clips for it.
+
+### Where the time goes
+
+| stage | time | share |
+|---|---|---|
+| spectrogram | 5.2s | 1.5% |
+| encoder | 312s | 88% |
+| cross-attention K/V | 25s | 7% |
+| 10 tokens | 8s | 2% |
+
+353s total against the 356s predicted from measured pure-Lua throughput,
+which is closer than it had any right to be. The encoder is a fixed cost:
+Whisper always encodes a 30-second window, so a 3.7-second clip pays the
+same as a full one.
 
 ## The model
 
@@ -259,6 +308,113 @@ All simplifications except the GELU:
 | masking | causal | none — audio attention is bidirectional |
 | cache | KV cache | none; the encoder runs once over fixed 1500 positions |
 
+## Decoder
+
+`decoder.lua` is self-attention over generated tokens, cross-attention over
+the audio, and the tied lm_head. Teacher-forced against a PyTorch dump:
+
+```
+pos  token      max |diff|          rel        lua        ref
+1    50257      1.507e-05    2.699e-06      50361      50361
+...
+11   3290       6.444e-06    4.147e-06        338        338
+
+worst |diff| 1.507e-05 at position 1
+argmax agreement: 11/11
+decoder parity passed
+```
+
+```bash
+python tools/reference_decode.py
+lua54 validate_decoder.lua whisper-tiny.en.lwb reference_decode.ref
+```
+
+0.7s per token. **Argmax agreement is the headline, not the logit
+difference** -- logit drift at 1e-5 changes nothing, while a changed argmax
+is a changed word. The check fails on either, but only one of them maps onto
+"the transcript is the same".
+
+### Two caches, doing different jobs
+
+The self-attention cache is the familiar one: keys and values for tokens
+already emitted, appended one per step.
+
+The cross-attention cache is what makes decoding cheap. Its keys and values
+come from the **encoder** output, which does not change while decoding, so K
+and V for all 1500 audio positions are computed once before the first token
+and reused forever after. That is 26 seconds here. Recomputing it per token
+would add those 26 seconds to every step and turn a 50-token transcript from
+about thirty seconds into fifteen minutes.
+
+### What dominates a step
+
+Not attention -- the **lm_head**. 384 x 51864 is 19.9M multiply-accumulates,
+roughly 40 of the ~60 MFLOP a step costs. Everything else together is a
+third of the work.
+
+### Teacher-forced, and not via generate()
+
+The reference scores a fixed token sequence rather than whatever the model
+would produce. Parity only needs both sides to see the same tokens, and
+decoupling from `generate()` avoided two real problems: the synthetic test
+signal is not speech, so greedy decoding emits a single token and there is
+nothing to compare; and `generate()`'s first positional argument is
+`input_ids` in transformers 5.x, so `generate(mel, ...)` feeds a
+spectrogram into a token embedding and fails with an indices dtype error
+that reads like a decoder bug and is not one.
+
+The reference also supplies the encoder states. `encoder.lua` has its own
+parity check, and feeding its output in here would leave a failure ambiguous
+between the two -- as well as adding five minutes to a check that otherwise
+takes seconds per token.
+
+## Tokenizer
+
+Decode only, and that is the whole point. Transcription runs
+audio -> tokens -> text; nothing in that chain turns text into tokens, so
+there is no merge table, no BPE priority loop, and no pre-tokenizer regex
+with Unicode category classes. That is the error-prone half of a GPT-2
+tokenizer and none of it is needed to read the model's output.
+
+```bash
+python tools/export_tokenizer.py     # writes tokenizer.lwt, 768 KB
+python tools/check_tokenizer.py
+```
+
+```
+cases        : 53871
+  singles    : 51864 (every id)
+  sequences  : 2000 random + 7 hand-picked
+mismatches   : 0 (byte-exact)
+text check   : 0 mismatched (vs HF decode)
+tokenizer.lua matches WhisperTokenizer
+```
+
+### The byte-level mapping, and the two ways checking it goes wrong
+
+GPT-2 does not store raw bytes: byte 32 is a space, which cannot appear in a
+whitespace-delimited vocabulary, so every byte is mapped to a printable
+codepoint first. The token for `" the"` is U+0120 followed by `the`.
+Decoding reverses that and reads the result as UTF-8. Get it wrong and the
+transcript comes out with missing spaces or a stray `G`-with-dot mid-word --
+quiet, not loud.
+
+Two things made the *check* wrong before the tokenizer was:
+
+- **A byte-level vocabulary contains tokens that decode to a literal newline
+  and a carriage return.** Shipping decoded text over a line-delimited
+  protocol cannot frame itself. All 53,871 cases "failed" identically, which
+  is the signature of a broken harness -- a real bug does not fail
+  everything. Results now cross as hex.
+- **HF's `decode()` applies `errors="replace"`**, so a token holding a lone
+  UTF-8 continuation byte comes back as U+FFFD. `tokenizer.lua` returns the
+  raw byte, which is the behaviour that *composes*: join two such tokens and
+  you get a valid character; replace each in isolation and you have
+  destroyed it. Comparing against `decode()` marked the correct answer wrong
+  1,923 times. Byte-exactness is now checked against the mapping directly,
+  with the text cases still going through `decode()` so a wrong table would
+  still surface.
+
 ## Runtime
 
 Measured pure-Lua throughput on the development machine is 164 MFLOP/s peak
@@ -279,13 +435,13 @@ what Hugging Face computes.
 ## Planned
 
 ```text
-main.lua        wav in, text out
+main.lua        wav in, text out                       [done]
 audio.lua       WAV parsing, framing, mel projection    [done]
 fft.lua         the transform                          [done]
 encoder.lua     conv frontend, 4 transformer layers    [done]
-decoder.lua     self-attention, cross-attention, tied lm_head
+decoder.lua     self-attn, cross-attn, tied lm_head     [done]
 weights.lua     flat float32 loader                   [done]
-tokenizer.lua   GPT-2 byte-level BPE
+tokenizer.lua   GPT-2 byte-level BPE, decode only     [done]
 validate_encoder.lua  per-stage parity vs a PyTorch dump [done]
 tools/export_whisper.py                                [done]
 tools/reference.py                                     [done]

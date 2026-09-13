@@ -1,0 +1,8 @@
+audio      3.7s, 16000 Hz, 1 channel(s)
+mel        5.2s
+encoder    running (this is the slow part)...encoder    312s, 1500 positions
+cross-attn precomputing keys/values...cross-attn 25s (once, reused by every token)
+ The quick brown fox jumps over the lazy dog.
+
+tokens     10 in 8s (0.80s each)
+total      353s

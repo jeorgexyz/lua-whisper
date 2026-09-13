@@ -1,6 +1,9 @@
 *.lwb
 *.ref
+# Generated audio, but NOT the committed test clip: examples/speech.wav is
+# 118 KB and the end-to-end example cannot reproduce without it.
 *.wav
+!examples/speech.wav
 __pycache__/
 *.pyc
 .venv/
