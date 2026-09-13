@@ -8,8 +8,9 @@ The fourth project in the same line as
 [lua-agent](https://github.com/jeorgexyz/lua-agent) and
 [lua-mamba](https://github.com/jeorgexyz/lua-mamba)
 
-> **Status: in progress.** The spectrogram front end is written and checked
-> against numpy. The encoder, decoder and tokenizer are not written yet.
+> **Status: in progress.** The front end is done -- FFT checked against
+> numpy, log-mel checked against WhisperFeatureExtractor. The encoder,
+> decoder and tokenizer are not written yet.
 
 ## Design Philosophy
 
@@ -71,6 +72,57 @@ python tools/check_fft.py     # needs numpy
 lua54 bench_fft.lua
 ```
 
+## The front end
+
+`audio.lua` turns a WAV into the 80x3000 log-mel the encoder expects, and is
+checked against `WhisperFeatureExtractor` itself:
+
+```
+signal             frames   max |diff|  mean |diff|
+silence              3000    0.000e+00    0.000e+00
+dc                   3000    5.960e-08    5.811e-08
+sine 440             3000    1.162e-05    5.721e-08
+chirp                3000    6.089e-05    2.776e-07
+noise                3000    1.516e-06    2.193e-08
+short 3s             3000    1.812e-05    7.404e-08
+
+worst max |diff| 6.089e-05 (chirp)
+```
+
+That is float32 storage plus a log10, not a difference in behaviour. The
+signals are synthetic and seeded, so the check needs no audio file:
+`silence` exercises the mel floor and the clamp, `chirp` sweeps every band
+and would catch a flipped frequency axis, `short 3s` runs the pad-to-window
+path.
+
+```bash
+python tools/export_mel.py    # writes mel80.bin, 63 KB
+python tools/check_mel.py
+```
+
+Whole front end: **5.1 s** for a 30-second clip, 1.4% of the estimated
+encoder time.
+
+### Four conventions that are easy to get wrong
+
+Each of these is invisible when wrong -- the spectrogram still looks like a
+spectrogram, and the transcript is just quietly worse:
+
+- **Periodic** Hann (divide by `n`, not `n-1`). `torch.hann_window` defaults
+  to periodic; the symmetric variant is a different window.
+- **Reflect** padding by 200, not zeros. `[a,b,c,d]` becomes
+  `[c,b,a,b,c,d,c,b]` -- the edge sample is not repeated.
+- The last frame is dropped **after** the log. Framing gives 3001 frames for
+  30 seconds; the model wants 3000.
+- The clamp is relative to **this clip's** maximum, so it is not a fixed
+  floor and two clips normalise differently. That is intended.
+
+The mel filterbank is exported as a constant rather than reconstructed in
+Lua. It is a fixed 201x80 matrix that depends only on sample rate and
+`n_fft`, and reimplementing hertz-to-mel plus Slaney normalisation would be
+eighty lines whose only job is to reproduce a table that already exists --
+every one of them a place to put a silent half-bin offset.
+
 ### Why a direct DFT and not an FFT
 
 Whisper uses `n_fft = 400`, which is not a power of two, so radix-2 does not
@@ -113,7 +165,7 @@ what Hugging Face computes.
 
 ```text
 main.lua        wav in, text out
-audio.lua       WAV parsing, framing, mel projection
+audio.lua       WAV parsing, framing, mel projection    [done]
 fft.lua         the transform                          [done]
 encoder.lua     conv frontend, 4 transformer layers
 decoder.lua     self-attention, cross-attention, tied lm_head
@@ -123,6 +175,8 @@ validate.lua    per-layer parity against a PyTorch dump
 tools/export_whisper.py
 tools/reference.py
 tools/check_fft.py                                     [done]
+tools/check_mel.py                                     [done]
+tools/export_mel.py                                    [done]
 ```
 
 Two claims, once it runs: per-layer parity against Hugging Face, and an
