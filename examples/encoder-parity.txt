@@ -1,0 +1,18 @@
+reference: mel 80x3000, T=1500, d=384, 4 layers
+
+[25s] conv stem
+  conv         max 1.753e-005   mean 2.578e-007   rel 9.517e-006 (at 1.8)
+[96s] layer 1
+  layer 1      max 1.392e-005   mean 5.201e-007   rel 8.623e-006 (at 1.0)
+[167s] layer 2
+  layer 2      max 1.505e-005   mean 7.682e-007   rel 1.266e-005 (at 1.0)
+[237s] layer 3
+  layer 3      max 1.893e-005   mean 1.176e-006   rel 1.418e-005 (at 1.0)
+[306s] layer 4
+  layer 4      max 2.173e-002   mean 3.296e-006   rel 7.085e-004 (at -2.4)
+[306s] final layer norm
+  final        max 9.217e-004   mean 1.840e-006   rel 5.526e-004 (at 1.7)
+
+worst relative 7.085e-004 at layer 4   (306s total)
+elements outside |a-b| <= 5e-003 + 1e-003|b|: 0
+encoder parity passed

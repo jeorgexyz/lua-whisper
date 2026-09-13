@@ -8,8 +8,8 @@ The fourth project in the same line as
 [lua-agent](https://github.com/jeorgexyz/lua-agent) and
 [lua-mamba](https://github.com/jeorgexyz/lua-mamba)
 
-> **Status: in progress.** Front end and weight loading are done and
-> checked against Hugging Face. The encoder, decoder and tokenizer are not
+> **Status: in progress.** Front end, weight loading and the encoder are
+> done and checked against Hugging Face. The decoder and tokenizer are not
 > written yet.
 
 ## Design Philosophy
@@ -194,6 +194,71 @@ So it is not left to a comment:
 Size checks alone would not catch a wrong *order*: swap two tensors of
 equal shape and the byte count stays perfect. Hence the value probes.
 
+## Encoder
+
+`encoder.lua` is the conv stem plus four pre-norm transformer layers,
+checked stage by stage against a Hugging Face dump:
+
+```
+  conv         max 1.753e-05   mean 2.578e-07   rel 9.517e-06
+  layer 1      max 1.392e-05   mean 5.201e-07   rel 8.623e-06
+  layer 2      max 1.505e-05   mean 7.682e-07   rel 1.266e-05
+  layer 3      max 1.893e-05   mean 1.176e-06   rel 1.418e-05
+  layer 4      max 2.173e-02   mean 3.296e-06   rel 7.085e-04
+  final        max 9.217e-04   mean 1.840e-06   rel 5.526e-04
+
+elements outside |a-b| <= 5e-3 + 1e-3|b|: 0
+encoder parity passed
+```
+
+```bash
+python tools/reference.py                          # dumps every stage
+lua54 validate_encoder.lua whisper-tiny.en.lwb reference.ref
+lua54 validate_encoder.lua whisper-tiny.en.lwb reference.ref 1   # conv + layer 1
+```
+
+306 seconds for a 30-second clip. The third argument stops early, which
+matters: a conv layout error surfaces 25 seconds in rather than after the
+full pass.
+
+### Whisper needs a relative tolerance, and lua-mamba did not
+
+The first full run failed. Layer 4 reported a max absolute error of 2.2e-2
+against a 1e-3 threshold.
+
+It was not a bug, and the tell was that **the max jumped a thousandfold
+while the mean barely moved** — 1.18e-6 to 3.3e-6. A real error moves both.
+
+The worst element sits at a reference value of **-320.65**, a relative error
+of 6.8e-5. Layer 4 of tiny.en peaks at **|564|**, with 52 of its 576,000
+values above 50 — the massive activations transformers are known to carry.
+At that magnitude, ordinary float32 noise *is* 2e-2 in absolute terms.
+
+So the check now gates the way `numpy.allclose` does, on
+`|a-b| <= atol + rtol*|b|`, and reports relative error beside absolute.
+`lua-mamba` got away with a plain absolute tolerance because its activations
+are O(1); Whisper's are not, and that is an architectural difference worth
+naming rather than tuning around.
+
+### The GELU has to be the exact one
+
+`F.gelu` defaults to the erf form and Whisper was trained that way. The erf
+here (Abramowitz & Stegun 7.1.26) is accurate to **2.08e-7**; the tanh
+approximation is off by **4.7e-4**, which is above tolerance and would fail
+the check outright. Measured, not assumed.
+
+### Other differences from the llama-family siblings
+
+All simplifications except the GELU:
+
+| | lua-llama / lua-mamba | here |
+|---|---|---|
+| norm | RMSNorm | LayerNorm with bias, eps 1e-5 |
+| positions | RoPE | learned, added once |
+| activation | SwiGLU | exact GELU |
+| masking | causal | none — audio attention is bidirectional |
+| cache | KV cache | none; the encoder runs once over fixed 1500 positions |
+
 ## Runtime
 
 Measured pure-Lua throughput on the development machine is 164 MFLOP/s peak
@@ -217,13 +282,13 @@ what Hugging Face computes.
 main.lua        wav in, text out
 audio.lua       WAV parsing, framing, mel projection    [done]
 fft.lua         the transform                          [done]
-encoder.lua     conv frontend, 4 transformer layers
+encoder.lua     conv frontend, 4 transformer layers    [done]
 decoder.lua     self-attention, cross-attention, tied lm_head
 weights.lua     flat float32 loader                   [done]
 tokenizer.lua   GPT-2 byte-level BPE
-validate.lua    per-layer parity against a PyTorch dump
+validate_encoder.lua  per-stage parity vs a PyTorch dump [done]
 tools/export_whisper.py                                [done]
-tools/reference.py
+tools/reference.py                                     [done]
 tools/check_fft.py                                     [done]
 tools/check_mel.py                                     [done]
 tools/export_mel.py                                    [done]
