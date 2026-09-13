@@ -1,18 +1,17 @@
 # Lua Whisper
 
-Speech recognition in pure Lua 5.3+. CPU only, no Torch, no C extensions, no
+Speech recognition in pure Lua 5.3+. CPU only, no Torch, C extensions, or
 runtime dependencies.
 
 The fourth project in the same line as
 [lua-llama](https://github.com/jeorgexyz/lua-llama),
 [lua-agent](https://github.com/jeorgexyz/lua-agent) and
-[lua-mamba](https://github.com/jeorgexyz/lua-mamba): keep the mechanism small
-enough to read, then give it a falsifiable correctness test.
+[lua-mamba](https://github.com/jeorgexyz/lua-mamba)
 
 > **Status: in progress.** The spectrogram front end is written and checked
 > against numpy. The encoder, decoder and tokenizer are not written yet.
 
-## What this is not
+## Design Philosophy
 
 [whisper.cpp](https://github.com/ggml-org/whisper.cpp) is the real runtime.
 It is faster than real time, runs on Metal and CUDA, quantizes, does beam
@@ -93,7 +92,7 @@ arithmetic to move a 1.2% number is a bad trade in a repo built to be read.
 `bench_fft.lua` prints these numbers so the trade can be checked rather than
 believed.
 
-## Runtime, honestly
+## Runtime
 
 Measured pure-Lua throughput on the development machine is 164 MFLOP/s peak
 matmul, ~104 MFLOP/s end to end across lua-llama and lua-mamba. From that:
@@ -129,7 +128,7 @@ tools/check_fft.py                                     [done]
 Two claims, once it runs: per-layer parity against Hugging Face, and an
 exact greedy transcript match on a known clip.
 
-## One trap worth writing down
+## Notes
 
 In Whisper's attention, `k_proj` has **no bias** while `q_proj`, `v_proj`
 and `out_proj` all do — in both self- and cross-attention. An exporter that
